@@ -17,6 +17,7 @@ import util.propnet.architecture.Component;
 import util.propnet.architecture.PropNet;
 import util.propnet.architecture.components.Proposition;
 import util.propnet.factory.CachedPropNetFactory;
+import util.propnet.factory.OptimizingPropNetFactory;
 import util.statemachine.MachineState;
 import util.statemachine.Move;
 import util.statemachine.Role;
@@ -35,6 +36,19 @@ public class PropNetStateMachine extends StateMachine {
     /** The player roles */
     private List<Role> roles;
     
+    //saves state information to prevent recomputation....
+    private MachineState saved = null;
+    
+    //we should also save what the propositions are so we don't make them over and over again...
+    private Map<GdlTerm, Proposition> inputProps = null;
+    private Map<GdlTerm, Proposition> baseProps = null;
+    private Proposition initProp = null;
+    private Proposition terminalProp = null;
+    private Map<Role, Set<Proposition>> legalProps = null;
+    private Map<Role, Set<Proposition>> goalProps = null;
+    
+    
+    
     /**
      * Initializes the PropNetStateMachine. You should compute the topological
      * ordering here. Additionally you may compute the initial state here, at
@@ -42,8 +56,19 @@ public class PropNetStateMachine extends StateMachine {
      */
     @Override
     public void initialize(List<Gdl> description) {
-        propNet = CachedPropNetFactory.create(description);
+        propNet = OptimizingPropNetFactory.create(description);
         roles = propNet.getRoles();
+        
+        inputProps = propNet.getInputPropositions();
+        baseProps = propNet.getBasePropositions();
+        legalProps = propNet.getLegalPropositions();
+        goalProps = propNet.getGoalPropositions();
+        
+        initProp = propNet.getInitProposition();
+        terminalProp = propNet.getTerminalProposition();
+
+        
+        
         ordering = getOrdering();
     }    
     
@@ -53,8 +78,10 @@ public class PropNetStateMachine extends StateMachine {
 	 */
 	@Override
 	public boolean isTerminal(MachineState state) {
+		if(saved != state)
+				updateState(state, null);
 		// TODO: Compute whether the MachineState is terminal.
-		return false;
+		return terminalProp.getValue();
 	}
 	
 	/**
@@ -67,8 +94,24 @@ public class PropNetStateMachine extends StateMachine {
 	@Override
 	public int getGoal(MachineState state, Role role)
 	throws GoalDefinitionException {
+		if(saved != state)
+			updateState(state, null);
+		
+		Integer goal = null;
+		
+		for(Proposition prop : goalProps.get(role)) {
+			if (prop.getValue()) {
+				if (goal != null) {
+					throw new GoalDefinitionException(state, role);
+				}
+				goal = getGoalValue(prop);
+			}
+		}
+		
+		if (goal == null)
+			throw new GoalDefinitionException(state, role);
 		// TODO: Compute the goal for role in state.
-		return -1;
+		return goal;
 	}
 	
 	/**
@@ -78,8 +121,23 @@ public class PropNetStateMachine extends StateMachine {
 	 */
 	@Override
 	public MachineState getInitialState() {
-		// TODO: Compute the initial state.
-		return null;
+		saved = null;
+		for (Proposition p : inputProps.values()) {
+			p.setValue(false);
+		}
+		for (Proposition p : baseProps.values()) {
+			p.setValue(false);
+		}
+
+		initProp.setValue(true);
+
+		for (Proposition p : ordering){
+			if (p.getInputs().size() == 1) {
+				p.setValue(p.getSingleInput().getValue());
+			}
+		}		
+		System.out.println("getInitialState " + getStateFromBase());
+		return getStateFromBase();
 	}
 	
 	/**
@@ -89,7 +147,16 @@ public class PropNetStateMachine extends StateMachine {
 	public List<Move> getLegalMoves(MachineState state, Role role)
 	throws MoveDefinitionException {
 		// TODO: Compute legal moves.
-		return null;
+		if (saved != state)
+			updateState(state, null);
+
+		List<Move> moves = new ArrayList<Move>();
+		for (Proposition p : legalProps.get(role)) {
+			if (p.getValue()) {
+				moves.add(getMoveFromProposition(p));
+			}			
+		}
+		return moves;
 	}
 	
 	/**
@@ -98,8 +165,50 @@ public class PropNetStateMachine extends StateMachine {
 	@Override
 	public MachineState getNextState(MachineState state, List<Move> moves)
 	throws TransitionDefinitionException {
-		// TODO: Compute the next state.
-		return null;
+		updateState(state, moves);		
+		return getStateFromBase();
+	}
+	
+	public void updateState(MachineState state, List<Move> moves) {
+		//This if condition doesn't seem to improve the efficiency.
+		//if (savedState == null || state != savedState) {
+			// Set base propositions
+			for (Proposition p :baseProps.values()) {
+				p.setValue(false);
+			}
+
+			for (GdlSentence s : state.getContents()) {
+				baseProps.get(s.toTerm()).setValue(true);
+			}
+		//}
+
+		// Set input propositions
+		for (Proposition p : inputProps.values()) {
+			p.setValue(false);
+		}
+
+		if (moves != null) {			
+			List<GdlTerm> does = toDoes(moves);
+			for (GdlTerm term : does) {
+				Proposition p = inputProps.get(term);
+				p.setValue(true);
+			}
+		}
+
+		initProp.setValue(false);
+
+		// Propagate the values
+		for (Proposition p : ordering){
+			if (p.getInputs().size() == 1) {
+				p.setValue(p.getSingleInput().getValue());
+			}
+		}
+
+		// When moves = null, clear the cache since it's already one move ahead of the state. 
+		if (moves != null)
+			saved = null;
+		else
+			saved = state;
 	}
 	
 	/**
@@ -128,7 +237,50 @@ public class PropNetStateMachine extends StateMachine {
 		List<Proposition> propositions = new ArrayList<Proposition>(propNet.getPropositions());
 		
 	    // TODO: Compute the topological ordering.		
-		
+		Set<Proposition> visited = new HashSet<Proposition>();
+		Set<Proposition> unvisited = new HashSet<Proposition>();
+
+		visited.addAll(baseProps.values());
+		visited.addAll(inputProps.values());
+		visited.add(propNet.getInitProposition()); // not sure if necessary, but shouldn't hurt
+
+		unvisited.addAll(propositions);
+		unvisited.removeAll(visited);
+
+		while (!unvisited.isEmpty()) {
+			// Pick next proposition whose inputs have all been visited
+			Proposition nextProposition = null;
+			for (Proposition unvisitedProp : unvisited) {
+				// Calculate all propositional inputs of unvisitedProp
+				Set<Proposition> inputs = new HashSet<Proposition>();
+		        Set<Component> toCheck = new HashSet<Component>();
+
+		        toCheck.add(unvisitedProp);
+		        while (!toCheck.isEmpty()) {
+		        	Component comp = toCheck.iterator().next();
+		        	toCheck.remove(comp);
+		        	for (Component input : comp.getInputs()) {
+		            	if (input instanceof Proposition)
+		            		inputs.add((Proposition) input);
+		                else
+		                	toCheck.add(input);
+		            }
+		        }
+
+				if (visited.containsAll(inputs)) {
+					nextProposition = unvisitedProp;
+					break;
+				}
+			}
+
+			// Add to visited set and remove from unvisited set
+			visited.add(nextProposition);
+			unvisited.remove(nextProposition);
+
+			// Add to order
+			order.add(nextProposition);
+		}
+
 		return order;
 	}
 	

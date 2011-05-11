@@ -55,6 +55,8 @@ public final class MinimaxGamer extends StateMachineGamer
 		numDepthSamples = 0;
 		averageDepthTime = 0;
 		searchedMoves.clear();
+		nodeQueue.clear();
+		//stateMap.clear();
 		MachineState rootState = getCurrentState();
 		Move selection = findBestMove(rootState, getRole(), timeout-30);
 		
@@ -68,6 +70,8 @@ public final class MinimaxGamer extends StateMachineGamer
 		searchTreeFromRoot(rootState, curRole, timeout);
 		
 		StateNode rootNode = stateMap.get(rootState);
+		if (rootNode.maxScore >= 100) System.out.println("Victory is ours!");
+		if (rootNode.maxScore <= 0 ) System.out.println("defeat...");
 		if (rootNode.maxMove == null)
 			return getStateMachine().getRandomMove(rootState, curRole);
 		return rootNode.maxMove.move;
@@ -103,7 +107,7 @@ public final class MinimaxGamer extends StateMachineGamer
 		//Execute BFS
 		while (!nodeQueue.isEmpty())
 		{
-			if (System.currentTimeMillis() > timeout - (100 + 1.5 * NUM_PROBES * averageDepthTime)) break;
+			if (System.currentTimeMillis() > timeout - (150 + 1.5 * NUM_PROBES * averageDepthTime)) break;
 			StateNode curNode = nodeQueue.remove();
 			List<Move> possMoves = curMachine.getLegalMoves(curNode.state, curRole);
 			
@@ -140,7 +144,20 @@ public final class MinimaxGamer extends StateMachineGamer
 							}*/
 						}
 						curMoveNode.nextStates.add(nextNode);
-						seenNodes.add(nextNode);
+						if (!seenNodes.contains(nextNode))
+						{
+							if (!nextNode.isExpanded)
+							{
+								nextNode.depth = curNode.depth+1;
+								nextNode.searchScore = nextNode.depth;
+								nodeQueue.add(nextNode);
+							}
+							else //Add everything nextNode needs to expand
+							{
+								fillNodeQueue(nextNode, seenNodes);
+							}
+							seenNodes.add(nextNode);
+						}
 					}
 					else
 					{
@@ -205,7 +222,7 @@ public final class MinimaxGamer extends StateMachineGamer
 			calcStateScore(curNode);
 			
 			curNode.isExpanded = true;
-			UpdateStateParents(curNode, rootNode, seenNodes);
+			UpdateStateParents(curNode, seenNodes);
 			numMovesExpanded++;
 		}
 		
@@ -243,7 +260,7 @@ public final class MinimaxGamer extends StateMachineGamer
 			}
 			if (numLegalMoves == 0) curNode.stateScore = 50; //Should never be hit as long as we have a maxMove
 		}
-		else
+		else if (curNode.isTerminal)
 		{
 			curNode.stateScore = curNode.maxScore + (curNode.maxScore-50.0)/100.0;
 		}
@@ -266,13 +283,17 @@ public final class MinimaxGamer extends StateMachineGamer
  				for (StateNode nextState : curMove.nextStates)
 				{
 					if (!seenNodes.contains(nextState))
+					{
+						nextState.searchScore = nextState.searchScore - nextState.depth + rootNode.depth + 1;
+						nextState.depth = rootNode.depth+1;
 						fillNodeQueue(nextState, seenNodes);
+					}
 				}
 			}
 		}
 	}
 	
-	public void UpdateStateParents(StateNode curNode, StateNode rootNode, HashSet<StateNode> seenNodes) throws TransitionDefinitionException, MoveDefinitionException, GoalDefinitionException
+	public void UpdateStateParents(StateNode curNode, HashSet<StateNode> seenNodes) throws TransitionDefinitionException, MoveDefinitionException, GoalDefinitionException
 	{
 		for (MoveNode curMoveNode : curNode.prevMoves)
 		{
@@ -284,7 +305,7 @@ public final class MinimaxGamer extends StateMachineGamer
 			{
 				curMoveNode.minScore = curNode.stateScore;
 				curMoveNode.minState = curNode;
-				UpdateMoveParent(curMoveNode, rootNode, seenNodes);
+				UpdateMoveParent(curMoveNode, seenNodes);
 			}
 			else if (curMoveNode.minState != null && curMoveNode.minState.state.equals(curNode.state))
 			{
@@ -299,12 +320,12 @@ public final class MinimaxGamer extends StateMachineGamer
 						curMoveNode.minState = nextNode;
 					}
 				}
-				UpdateMoveParent(curMoveNode, rootNode, seenNodes);
+				UpdateMoveParent(curMoveNode, seenNodes);
 			}
 		}
 	}
 	
-	public void UpdateMoveParent(MoveNode curMove, StateNode rootNode, HashSet<StateNode> seenNodes) throws TransitionDefinitionException, MoveDefinitionException, GoalDefinitionException
+	public void UpdateMoveParent(MoveNode curMove, HashSet<StateNode> seenNodes) throws TransitionDefinitionException, MoveDefinitionException, GoalDefinitionException
 	{
 		StateNode prevState = curMove.prevState;
 		if (curMove.minState != null && 
@@ -314,32 +335,36 @@ public final class MinimaxGamer extends StateMachineGamer
 			prevState.maxMove = curMove;
 			prevState.isTerminal = curMove.minState.isTerminal;
 			calcStateScore(prevState);
-			UpdateStateParents(prevState, rootNode, seenNodes);
+			UpdateStateParents(prevState, seenNodes);
 		}
 		else if (prevState.maxMove != null && prevState.maxMove.move.equals(curMove.move))
 		{
 			prevState.maxMove = null;
-			for (MoveNode prevMove : prevState.nextMoves)
+			for (MoveNode nextMove : prevState.nextMoves)
 			{
-				if (prevMove.minState != null && prevMove.minState.isExpanded &&
-					(prevState.maxScore < prevMove.minScore || prevState.maxMove == null))
+				if (nextMove.minState != null && 
+					(prevState.maxScore < nextMove.minScore || prevState.maxMove == null))
 				{
-					prevState.maxScore = prevMove.minScore;
-					prevState.maxMove = prevMove;
-					prevState.isTerminal = prevMove.minState.isTerminal;
+					prevState.maxScore = nextMove.minScore;
+					prevState.maxMove = nextMove;
+					prevState.isTerminal = nextMove.minState.isTerminal;
 				}
 			}
 			calcStateScore(prevState);
-			UpdateStateParents(prevState, rootNode, seenNodes);
+			UpdateStateParents(prevState, seenNodes);
 		}
 		else {
+			double oldScore = prevState.stateScore;
 			calcStateScore(prevState); //Just for safety
+			if (oldScore != prevState.stateScore) UpdateStateParents(prevState, seenNodes);
 		}
 	}
 	
 	@Override
 	public void stateMachineStop() {
-		// Do nothing.
+		stateMap.clear();
+		searchedMoves.clear();
+		nodeQueue.clear();
 	}
 
 	/**
@@ -396,8 +421,8 @@ class StateNode implements Comparable<StateNode>
 	public MachineState state;
 	
 	//Tree linkages and info
-	public LinkedList<MoveNode> prevMoves;
-	public LinkedList<MoveNode> nextMoves;
+	public List<MoveNode> prevMoves;
+	public List<MoveNode> nextMoves;
 	public int depth;
 	
 	//Best move info
@@ -427,7 +452,7 @@ class MoveNode
 	
 	//Tree linkages
 	public StateNode prevState;
-	public LinkedList<StateNode> nextStates;
+	public List<StateNode> nextStates;
 	
 	//Best move info
 	public double minScore;
